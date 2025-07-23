@@ -1,137 +1,66 @@
-Vagrantly = "" # Dummy to avoid highlighting issues
+VAGRANTFILE_API_VERSION = "2"
 
-Vagrant.configure("2") do |config|
-  config.vm.box = "ubuntu/focal64"
+Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
 
-  # Define both VMs with fixed private IPs
-  config.vm.define "vm1" do |vm1|
-    vm1.vm.hostname = "vm1"
-    vm1.vm.network "private_network", ip: "192.168.56.11"
+  # === VM pentru BAZA DE DATE ===
+  config.vm.define "db" do |db|
+    db.vm.box = "ubuntu/bionic64"
+    db.vm.hostname = "db"
+    db.vm.network "private_network", ip: "192.168.56.10"
 
-    vm1.vm.provider "virtualbox" do |v|
-      v.memory = 1024
-      v.cpus = 1
-    end
-
-    # Provision vm1
-    vm1.vm.provision "shell" do |s|
-      s.inline = <<-SHELL
-        set -e
-
-        # Generate SSH key for vagrant user if not exists (no passphrase)
-        if [ ! -f /home/vagrant/.ssh/id_rsa ]; then
-          ssh-keygen -t rsa -b 2048 -f /home/vagrant/.ssh/id_rsa -q -N ""
-          chown vagrant:vagrant /home/vagrant/.ssh/id_rsa*
-          chmod 600 /home/vagrant/.ssh/id_rsa
-          chmod 644 /home/vagrant/.ssh/id_rsa.pub
-        fi
-
-        # Setup authorized_keys with own public key (allow self SSH)
-        cat /home/vagrant/.ssh/id_rsa.pub >> /home/vagrant/.ssh/authorized_keys || true
-
-        # Fix permissions
-        chown vagrant:vagrant /home/vagrant/.ssh/authorized_keys
-        chmod 600 /home/vagrant/.ssh/authorized_keys
-      SHELL
-    end
+    db.vm.provision "shell", inline: <<-SHELL
+      sudo apt update
+      sudo apt install -y mongodb
+      sudo sed -i 's/bind_ip = 127.0.0.1/bind_ip = 0.0.0.0/' /etc/mongodb.conf
+      sudo systemctl restart mongodb
+      sudo systemctl enable mongodb
+    SHELL
   end
 
-  config.vm.define "vm2" do |vm2|
-    vm2.vm.hostname = "vm2"
-    vm2.vm.network "private_network", ip: "192.168.56.12"
+  # === VM pentru APLICAȚIE ===
+  config.vm.define "app" do |app|
+    app.vm.box = "ubuntu/bionic64"
+    app.vm.hostname = "app"
+    app.vm.network "private_network", ip: "192.168.56.11"
+    app.vm.network "forwarded_port", guest: 3000, host: 3000  # fallback
+    app.vm.provision "shell", inline: <<-SHELL
+      # Copiază aplicația din /vagrant/app în VM (o singură dată)
+      if [ ! -d "/home/vagrant/app" ]; then
+        mkdir /home/vagrant/app
+        cp -r /vagrant/app/* /home/vagrant/app/
+      fi
 
-    vm2.vm.provider "virtualbox" do |v|
-      v.memory = 1024
-      v.cpus = 1
-    end
+      # Instalează Node.js 16 și nginx
+      curl -fsSL https://deb.nodesource.com/setup_16.x | sudo -E bash -
+      sudo apt install -y nodejs npm nginx
 
-    # Provision vm2
-    vm2.vm.provision "shell" do |s|
-      s.inline = <<-SHELL
-        set -e
+      # Instalează deps
+      cd /home/vagrant/app
+      npm install
 
-        # Generate SSH key for vagrant user if not exists (no passphrase)
-        if [ ! -f /home/vagrant/.ssh/id_rsa ]; then
-          ssh-keygen -t rsa -b 2048 -f /home/vagrant/.ssh/id_rsa -q -N ""
-          chown vagrant:vagrant /home/vagrant/.ssh/id_rsa*
-          chmod 600 /home/vagrant/.ssh/id_rsa
-          chmod 644 /home/vagrant/.ssh/id_rsa.pub
-        fi
+      # Modifică aplicația să se conecteze la DB VM
+      sed -i 's|mongodb://localhost:27017|mongodb://192.168.56.10:27017|' index.js
 
-        # Setup authorized_keys with own public key (allow self SSH)
-        cat /home/vagrant/.ssh/id_rsa.pub >> /home/vagrant/.ssh/authorized_keys || true
+      # Configurare NGINX reverse proxy
+      sudo rm -f /etc/nginx/sites-enabled/default
+      cat <<EOF | sudo tee /etc/nginx/sites-available/todo
+server {
+    listen 80;
+    server_name todo.local;
 
-        # Fix permissions
-        chown vagrant:vagrant /home/vagrant/.ssh/authorized_keys
-        chmod 600 /home/vagrant/.ssh/authorized_keys
-      SHELL
-    end
+    location / {
+        proxy_pass http://localhost:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host \$host;
+        proxy_cache_bypass \$http_upgrade;
+    }
+}
+EOF
+      sudo ln -s /etc/nginx/sites-available/todo /etc/nginx/sites-enabled/todo
+      sudo systemctl restart nginx
+    SHELL
   end
 
-  # After both VMs are up, synchronize their public keys so they trust each other
-
-  # Run after vm1 and vm2 have generated keys
-
-
-  # Additional provisioners to sync public keys between VMs
-
-  # on vm1: fetch vm2's public key and add it to vm1's authorized_keys
-  config.vm.define "vm1" do |vm1|
-    vm1.vm.provision "shell" do |s|
-      s.inline = <<-SHELL
-        set -e
-
-        VM2_PUB_KEY=$(sshpass -p vagrant ssh -o StrictHostKeyChecking=no vagrant@192.168.56.12 'cat ~/.ssh/id_rsa.pub')
-
-        if ! grep -q "$VM2_PUB_KEY" /home/vagrant/.ssh/authorized_keys; then
-          echo "$VM2_PUB_KEY" >> /home/vagrant/.ssh/authorized_keys
-          chown vagrant:vagrant /home/vagrant/.ssh/authorized_keys
-        fi
-      SHELL
-    end
-  end
-
-  # on vm2: fetch vm1's public key and add it to vm2's authorized_keys
-  config.vm.define "vm2" do |vm2|
-    vm2.vm.provision "shell" do |s|
-      s.inline = <<-SHELL
-        set -e
-
-        VM1_PUB_KEY=$(sshpass -p vagrant ssh -o StrictHostKeyChecking=no vagrant@192.168.56.11 'cat ~/.ssh/id_rsa.pub')
-
-        if ! grep -q "$VM1_PUB_KEY" /home/vagrant/.ssh/authorized_keys; then
-          echo "$VM1_PUB_KEY" >> /home/vagrant/.ssh/authorized_keys
-          chown vagrant:vagrant /home/vagrant/.ssh/authorized_keys
-        fi
-      SHELL
-    end
-  end
-
-  # Ensure sshpass is installed, which is absolutely necessary for password-based SSH inside provisioning.
-  # We will do this in a synced pre-provision step on both machines:
-
-  ["vm1", "vm2"].each do |name|
-    config.vm.define name do |machine|
-      machine.vm.provision "shell" do |s|
-        s.inline = <<-SHELL
-          set -e
-          sudo apt-get update -y
-          sudo apt-get install -y sshpass
-        SHELL
-      end
-    end
-  end
-
-  # Also ensure ssh service is running
-  ["vm1", "vm2"].each do |name|
-    config.vm.define name do |machine|
-      machine.vm.provision "shell" do |s|
-        s.inline = <<-SHELL
-          set -e
-          sudo systemctl enable ssh
-          sudo systemctl restart ssh
-        SHELL
-      end
-    end
-  end
 end
