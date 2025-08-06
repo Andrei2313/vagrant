@@ -1,0 +1,72 @@
+---
+- name: Install prerequisites
+  apt:
+    name:
+      - curl
+      - git
+    state: present
+    update_cache: yes
+
+- name: Install Node.js 16
+  shell: |
+    curl -fsSL https://deb.nodesource.com/setup_16.x | bash -
+    apt-get install -y nodejs
+
+- name: Copy app code
+  copy:
+    src: ./app/
+    dest: /home/vagrant/app/
+    owner: vagrant
+    group: vagrant
+    mode: '0755'
+
+- name: Install app dependencies
+  npm:
+    path: /home/vagrant/app
+    state: present
+
+- name: Install Nginx
+  apt:
+    name: nginx
+    state: present
+
+- name: Configure Nginx reverse proxy
+  copy:
+    dest: /etc/nginx/sites-available/todo
+    content: |
+      server {
+          listen 80;
+          server_name _;
+          location / {
+              proxy_pass http://localhost:3000;
+              proxy_http_version 1.1;
+              proxy_set_header Upgrade $http_upgrade;
+              proxy_set_header Connection 'upgrade';
+              proxy_set_header Host $host;
+              proxy_cache_bypass $http_upgrade;
+          }
+      }
+  notify: Restart Nginx
+
+- name: Enable Nginx site
+  file:
+    src: /etc/nginx/sites-available/todo
+    dest: /etc/nginx/sites-enabled/todo
+    state: link
+    force: yes
+
+- name: Remove default Nginx site
+  file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+
+- name: Start Node.js app
+  shell: |
+    nohup node /home/vagrant/app/index.js > /home/vagrant/app/app.log 2>&1 &
+  args:
+    chdir: /home/vagrant/app
+
+- name: Restart Nginx
+  service:
+    name: nginx
+    state: restarted
